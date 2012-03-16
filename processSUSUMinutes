@@ -7,6 +7,7 @@ use strict;
 use warnings;
 use utf8;
 binmode( STDOUT, ":utf8" );
+binmode( STDERR, ":utf8" );
 
 my $curl_cmd = 'curl -s';
 my $pdftoxml_cmd = './pdftoxml.exe -noImage';
@@ -31,7 +32,14 @@ my $ns = $pdf_url;
 $ns =~ s/\.pdf$//;
 $ns .= "#";
 my $rdf = meetingToRDF( $meeting_data, $ns );
-print $rdf->serialize();
+
+my %namespaces = %{$rdf->namespaces};
+delete $namespaces{'#default'};
+my $serializer = RDF::Trine::Serializer->new( "rdfxml",
+						  namespaces => \%namespaces,
+						  base_uri => $ns );
+
+$serializer->serialize_model_to_file( *STDOUT, $rdf->model );
 
 exit;
 
@@ -43,10 +51,13 @@ sub meetingToRDF
       		BaseInterface => 'RDF::Trine',
       		namespaces => {
           		dc => 'http://purl.org/dc/terms/',
+			foaf => 'http://xmlns.com/foaf/0.1/',
           		rdf => "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
           		meet => "http://totl.net/test/",
 			event => "http://purl.org/NET/c4dm/event.owl#",
 			rdfs => "http://www.w3.org/2000/01/rdf-schema#",
+			xsd => "http://www.w3.org/2001/XMLSchema#",
+			tl => "http://purl.org/NET/c4dm/timeline.owl#",
 
          		'#default' => $ns,
      		},
@@ -57,6 +68,8 @@ sub meetingToRDF
 	$rdf->assert_resource( $ns."meeting", "meet:meetingOf", $ns."group" );
 	$rdf->assert_resource( $ns."group", "rdf:type", "foaf:Group" );
 	
+
+
 	# first of all, the info bits
 	INFO: foreach my $k ( keys %{$meeting->{info}} )
 	{
@@ -73,6 +86,39 @@ sub meetingToRDF
 			next INFO;
 		}
 
+		my @attendence;
+		@attendence = ("meet:absent","meet:absentWithoutApologies") if( $k =~ m/without apologies/i );
+		@attendence = ("meet:absent","meet:absentWithApologies") if( $k =~ m/^apologies/i );
+		@attendence = ("meet:present") if( $k =~ m/by invitation/i );
+		@attendence = ("meet:present") if( $k =~ m/^in attendance/i );
+		@attendence = ("meet:present") if( $k =~ m/^with|present$/i );
+		@attendence = ("meet:present","meet:presentMember") if( $k =~ m/members present/i );
+		if( scalar @attendence )
+		{
+			PERSON: foreach my $person ( split( /\n/, $v ) )
+			{
+				next PERSON if( ! $person =~ m/[a-z]/i ); # people have words!
+				my $chair = 0;
+				$chair = 1 if( $person=~s/\\s*\(Chair\)// );
+			
+				my $id = $person;
+				$id =~ s/\b([a-z])/\u$1/g;
+				$id =~ s/[^a-z]//ig;
+				my $person_uri = $ns."person-$id";
+				$rdf->assert_literal( $person_uri, "rdfs:label", $person );
+				$rdf->assert_resource( $person_uri, "rdf:type", "foaf:Person" );
+				foreach my $rel ( @attendence )
+				{
+					$rdf->assert_resource( $ns."meeting", $rel, $person_uri );
+				}
+				if( $chair )
+				{
+					$rdf->assert_resource( $ns."meeting", "meet:chair", $person_uri );
+				}
+			}
+			next INFO;
+		}
+
 		if( $k =~ m/location|place/i )
 		{
 			$rdf->assert_resource( $ns."meeting", "event:place", $ns."place" );
@@ -80,9 +126,27 @@ sub meetingToRDF
 			next INFO;
 		}
 
+		# OK at this point it's probably the date & time or some junk 
+
+		my $combined = "$k $v";
+		if( $combined =~ m/(\d+).*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec).*((19|20)\d\d)/i )
+		{
+			my( $day, $mon, $year ) = ( $1,$2,$3 );
+			$mon={
+				Jan=>1, Feb=>2, Mar=>3, Apr=>4,
+				May=>5, Jun=>6, Jul=>7, Aug=>8,
+				Sep=>9, Oct=>10, Nov=>11, Dec=>12,
+			}->{$mon};
+			$rdf->assert_resource( $ns."meeting", "event:time", $ns."date" );
+			$rdf->assert_resource( $ns."date", "rdf:type", "tl:Instant" );
+			$rdf->assert_resource( $ns."date", "tl:at", 
+  				$rdf->new_literal( 
+					sprintf( "%04d-%02d-%02d", $year,$mon,$day), 
+					undef, 
+					"xsd:date" ) );
+
+		}
 	}
-
-
 
 
 	return $rdf;
