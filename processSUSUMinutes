@@ -34,7 +34,7 @@ $ns .= "#";
 my $rdf = meetingToRDF( $meeting_data, $ns, $pdf_url );
 
 my %namespaces = %{$rdf->namespaces};
-#delete $namespaces{'#default'};
+delete $namespaces{'#default'};
 my $serializer = RDF::Trine::Serializer->new( "rdfxml",
 						  namespaces => \%namespaces,
 						  base_uri => $ns );
@@ -69,7 +69,6 @@ sub meetingToRDF
 	$rdf->assert_resource( $ns."meeting", "meet:meetingOf", $ns."group" );
 	$rdf->assert_resource( $source_document_url, "foaf:primaryTopic", $ns."meeting" );
 	$rdf->assert_resource( $ns."group", "rdf:type", "foaf:Group" );
-$meeting->{info} = {};
 
 	# then the metadata we can find, and the attendees and no-shows
 	INFO: foreach my $k ( keys %{$meeting->{info}} )
