@@ -31,10 +31,10 @@ my $meeting_data = structureToMeetingData( $document_structure );
 my $ns = $pdf_url;
 $ns =~ s/\.pdf$//;
 $ns .= "#";
-my $rdf = meetingToRDF( $meeting_data, $ns );
+my $rdf = meetingToRDF( $meeting_data, $ns, $pdf_url );
 
 my %namespaces = %{$rdf->namespaces};
-delete $namespaces{'#default'};
+#delete $namespaces{'#default'};
 my $serializer = RDF::Trine::Serializer->new( "rdfxml",
 						  namespaces => \%namespaces,
 						  base_uri => $ns );
@@ -45,7 +45,7 @@ exit;
 
 sub meetingToRDF
 {
-	my( $meeting, $ns ) = @_;
+	my( $meeting, $ns, $source_document_url ) = @_;
 
  	my $rdf = RDF::Helper->new(
       		BaseInterface => 'RDF::Trine',
@@ -53,24 +53,25 @@ sub meetingToRDF
           		dc => 'http://purl.org/dc/terms/',
 			foaf => 'http://xmlns.com/foaf/0.1/',
           		rdf => "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
-          		meet => "http://totl.net/test/",
+          		meet => "http://purl.org/openorg/meetings/",
 			event => "http://purl.org/NET/c4dm/event.owl#",
 			rdfs => "http://www.w3.org/2000/01/rdf-schema#",
 			xsd => "http://www.w3.org/2001/XMLSchema#",
 			tl => "http://purl.org/NET/c4dm/timeline.owl#",
-
-         		'#default' => $ns,
+			ov => "http://open.vocab.org/terms/",
      		},
      		ExpandQNames => 1
   	);
 
+	# The basic structure; it's a meeting of a group described by the
+	# PDF file.
 	$rdf->assert_resource( $ns."meeting", "rdf:type", "meet:Meeting" );
 	$rdf->assert_resource( $ns."meeting", "meet:meetingOf", $ns."group" );
+	$rdf->assert_resource( $source_document_url, "foaf:primaryTopic", $ns."meeting" );
 	$rdf->assert_resource( $ns."group", "rdf:type", "foaf:Group" );
-	
+$meeting->{info} = {};
 
-
-	# first of all, the info bits
+	# then the metadata we can find, and the attendees and no-shows
 	INFO: foreach my $k ( keys %{$meeting->{info}} )
 	{
 		my $v = $meeting->{info}->{$k};
@@ -99,7 +100,7 @@ sub meetingToRDF
 			{
 				next PERSON if( ! $person =~ m/[a-z]/i ); # people have words!
 				my $chair = 0;
-				$chair = 1 if( $person=~s/\\s*\(Chair\)// );
+				$chair = 1 if( $person=~s/\s*\(Chair\)//i );
 			
 				my $id = $person;
 				$id =~ s/\b([a-z])/\u$1/g;
@@ -148,9 +149,45 @@ sub meetingToRDF
 		}
 	}
 
+	# Lastly the data on the items in the minutes
+	foreach my $item_id ( keys %{$meeting->{items}} )
+	{
+		my $item = $meeting->{items}->{$item_id};
+		$rdf->assert_resource( $ns."meeting", "meet:minuteItem", $ns."item-$item_id" );
+		itemToRDF( $rdf, $item, $item_id, $ns, "" );
+	}
+	#print Dumper( $meeting->{items} );
 
 	return $rdf;
 }
+
+sub itemToRDF
+{
+	my( $rdf, $item, $n, $ns, $id_prefix ) = @_;
+
+	$rdf->assert_resource( $ns."item-$id_prefix$n", "meet:atMeeting", $ns."meeting" );
+	$rdf->assert_resource( $ns."item-$id_prefix$n", "rdf:type", "meet:Item" );
+	$rdf->assert_literal( $ns."item-$id_prefix$n", "rdfs:label", "$id_prefix$n" );
+	$rdf->assert_literal( $ns."item-$id_prefix$n", "ov:rank",
+  				$rdf->new_literal( $n, undef, "xsd:int" ) );
+	if( $item->{text} )
+	{
+		$rdf->assert_literal( $ns."item-$id_prefix$n", "meet:minute", $item->{text} );
+	}
+	if( $item->{action} )
+	{
+		$rdf->assert_literal( $ns."item-$id_prefix$n", "meet:action", $ns."item-$id_prefix$n-action" );
+		$rdf->assert_literal( $ns."item-$id_prefix$n-action", "rdfs:label", $item->{action} );
+	}
+	foreach my $item_id ( keys %{$item->{items}} )
+	{
+		my $item = $item->{items}->{$item_id};
+		$rdf->assert_resource( $ns."item-$id_prefix$n", "meet:subItem", $ns."item-$id_prefix$n.$item_id" );
+		itemToRDF( $rdf, $item, $item_id, $ns, "$id_prefix$n." );
+	}
+	
+}	
+
 
 sub xmlToStructure
 {
@@ -186,15 +223,10 @@ sub xmlToStructure
 				$text2 =~ s/minutes//ig;
 				$text2 =~ s/page//ig;
 				$text2 =~ s/of//ig;
-				$text2 =~ s/action//ig;
-				$text2 =~ s/no//ig;
-				$text2 =~ s/discussion//ig;
-				$text2 =~ s/item//ig;
-				$text2 =~ s/date//ig;
 
 				# skips things which contain words but the only words are probably
 				# header & footer text.
-				# if( $text2 eq "" ) { next; }
+				if( $text2 eq "" ) { next; }
 			}
 
 
@@ -207,7 +239,7 @@ sub xmlToStructure
 			# shift items in the first 10% of the width to be slightly higher, thus
 			# helping the 58.1 be more likely to be above the first line of the item
 			# without making it higher than the last line of the previous item.
-			if( $rel_x < 10 && $text =~ m/^\d/ ) { $abs_y -= 20; }
+			# if( $rel_x < 10 && $text =~ m/^\d/ ) { $abs_y -= 20; }
 			$structure->{$abs_y}->{$rel_x} = $text;
 		}
 		$vertical_offset += $page_height;
@@ -218,7 +250,7 @@ sub xmlToStructure
 	{
 		my $row = $structure->{$y};
 		next if !defined $row;
-		LA: foreach my $look_ahead (1..5 )
+		LA: foreach my $look_ahead (1..10 )
 		{
 			next LA if( !defined $structure->{$y+$look_ahead} );
 			foreach my $k ( keys %{$structure->{$y+$look_ahead}} )
@@ -275,6 +307,12 @@ sub structureToMeetingData
 		}
 		my $text = join( ' ', @strings );
 		my $action = join( ' ', @actions );
+		if( $text =~ m/^ACTION/ )
+		{
+			$action = $text;
+			$text = "";
+			$action =~ s/^ACTION[^a-z0-9]//i;
+		}
 
 		next ROW if( $action =~ m/page\s+\d(\s+of\s+\d)?\s*$/i );
 		next ROW if( $text =~ m/page\s+\d(\s+of\s+\d)?\s*$/i );
