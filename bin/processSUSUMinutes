@@ -7,62 +7,25 @@ use warnings;
 use utf8;
 binmode( STDOUT, ":utf8" );
 
-my $xml_document = loadXML( $ARGV[0] );
-my $structure = XMLToStructure( $xml_document );
-my $meeting = { info => {}, items => {} };
+my $curl_cmd = 'curl -s';
+my $pdftoxml_cmd = 'bin/pdftoxml.exe';
+my $tmpdir = '/tmp'; # local to where you run the script from
+my $tmp = "$tmpdir/$$";
 
-my $section = "info";
-my $id;
-foreach my $y ( sort { $a <=> $b } keys %$structure )
-{
-	my $row = $structure->{$y};
-	
-	my @strings = ();
+my $pdf_url = $ARGV[0];
 
-	my $new_id;
-	STRING: foreach my $x ( sort { $a <=> $b } keys %$row )
-	{
-		next if !defined $row->{$x};
-		if( $x<10 && $row->{$x} =~ m/^[0-9\.]+$/ )
-		{
-			$new_id = $row->{$x};
-			$section = "items";
-			next STRING;
-		}
-		push @strings, $row->{$x};
-	}
-	my $text = join( ' ', @strings );
-	if( $section eq "info" && $text =~ m/:/ )
-	{
-		$text =~ s/^([^:]+):\s*//;
-		$new_id = $1;
-	}	
-	if( defined $new_id )
-	{
-		$meeting->{$section}->{$new_id}->{text} = $text;
-		$id = $new_id;
-		next;
-	}
-	if( defined $id )
-	{
-		$meeting->{$section}->{$id}->{text} .= "\n".$text;
-		next
-	}
-	print "ignored: $text\n";
-}
-print Dumper( $meeting );
+`$curl_cmd $pdf_url > $tmp.pdf`;
+`$pdftoxml_cmd $tmp.pdf $tmp.xml`;
+unlink( "$tmp.pdf" );
+
+my $xml_document = loadXML( "$tmp.xml" );
+my $document_structure = xmlToStructure( $xml_document );
+my $meeting_data = structureToMeetingData( $document_structure );
+print Dumper( $meeting_data );
+unlink( "$tmp.xml" );
 exit;
 
-sub loadXML
-{
-	my( $filename ) = @_;
-
-	my $parser = new XML::DOM::Parser;
-	my $doc = $parser->parsefile( $filename );
-	return $doc;
-}
-
-sub XMLToStructure
+sub xmlToStructure
 {
 	my( $doc ) = @_;
 	
@@ -100,6 +63,7 @@ sub XMLToStructure
 				$text2 =~ s/no//ig;
 				$text2 =~ s/discussion//ig;
 				$text2 =~ s/item//ig;
+				$text2 =~ s/date//ig;
 
 				# skips things which contain words but the only words are probably
 				# header & footer text.
@@ -137,3 +101,102 @@ sub XMLToStructure
 
 	return $structure;
 }	
+
+sub loadXML
+{
+	my( $filename ) = @_;
+
+	my $parser = new XML::DOM::Parser;
+	my $doc = $parser->parsefile( $filename );
+	return $doc;
+}
+
+
+sub structureToMeetingData
+{
+	my( $structure ) = @_;
+	
+	my $meeting = { info => {}, items => {} };
+	my $section = "info";
+	my $id;
+	foreach my $y ( sort { $a <=> $b } keys %$structure )
+	{
+		my $row = $structure->{$y};
+		
+		my @strings = ();
+		my @actions = ();
+		STRING: foreach my $x ( sort { $a <=> $b } keys %$row )
+		{
+			next if !defined $row->{$x};
+	
+			if( $x<10 && $row->{$x} =~ m/^[0-9\.]+$/ )
+			{
+				# ah, these are now numbered items
+				$id = $row->{$x};
+				$section = "items";
+				next STRING;
+			}
+			if( $x>75 && $section eq "items" )
+			{
+				push @actions, $row->{$x};
+				next STRING;
+			}
+			push @strings, $row->{$x};
+		}
+		my $text = join( ' ', @strings );
+		my $action = join( ' ', @actions );
+		if( $section eq "info" && $text =~ m/:/ )
+		{
+			$text =~ s/^([^:]+):\s*//;
+			$id = $1;
+		}	
+		next if( !defined $id );
+		
+		my $target;
+		if( $section eq "items" && $id =~ m/\./ )
+		{
+			my @parts = split( /\./	, $id );
+			$target = $meeting;
+			foreach my $subcode ( @parts )
+			{
+				if( !defined $target->{items}->{$subcode} )
+				{
+					$target->{items}->{$subcode} = {};
+				}
+				$target = $target->{items}->{$subcode};
+			}
+		}
+		else
+		{
+			if( !defined $meeting->{$section}->{$id} )
+			{
+				$meeting->{$section}->{$id} = {};
+			}
+			$target = $meeting->{$section}->{$id};
+		}
+		if( $action ne "" ) 
+		{
+			if( defined $target->{action} && $target->{action} ne "")
+			{
+				$target->{action} .= "\n".$action;
+			}
+			else
+			{
+				$target->{action} = $action;
+			}
+		}
+		if( defined $target->{text} && $target->{text} ne "")
+		{
+			$target->{text} .= "\n".$text;
+		}
+		else
+		{
+			$target->{text} = $text;
+		}
+	}
+	foreach my $id ( keys %{$meeting->{info}} )
+	{
+		$meeting->{info}->{$id} = $meeting->{info}->{$id}->{text};
+	}
+	return $meeting;
+}
